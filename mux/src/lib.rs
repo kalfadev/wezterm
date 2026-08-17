@@ -707,6 +707,33 @@ impl Mux {
             .insert(sub_id, Box::new(subscriber));
     }
 
+    /// Variant of `subscribe` that returns the
+    /// allocated subscriber id so the caller can later remove it via
+    /// [`Mux::remove_subscriber`]. `subscribe` swallows the id
+    /// (subscribers are only ever pruned when they return `false`); this
+    /// supports an embedding host whose UI state may be dropped before the
+    /// matching `PaneRemoved` fires. Without explicit removal
+    /// the subscriber closure leaks its captured `Arc` state into
+    /// `Mux::subscribers` indefinitely.
+    pub fn subscribe_returning_id<F>(&self, subscriber: F) -> usize
+    where
+        F: Fn(MuxNotification) -> bool + 'static + Send + Sync,
+    {
+        let sub_id = LAST_SUBSCRIBER_ID.fetch_add(1, Ordering::Relaxed);
+        self.subscribers
+            .write()
+            .insert(sub_id, Box::new(subscriber));
+        sub_id
+    }
+
+    /// Drop a subscriber identified by the id
+    /// returned from [`Mux::subscribe_returning_id`]. No-op if the id is
+    /// unknown (e.g., the subscriber already returned `false` during a
+    /// previous `notify` and was pruned by the `retain` loop).
+    pub fn remove_subscriber(&self, sub_id: usize) {
+        self.subscribers.write().remove(&sub_id);
+    }
+
     pub fn notify(&self, notification: MuxNotification) {
         let mut subscribers = self.subscribers.write();
         subscribers.retain(|_, notify| notify(notification.clone()));
