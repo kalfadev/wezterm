@@ -184,14 +184,16 @@ impl SessionInner {
         if let Some(agent) = self.config.get("identityagent") {
             sess.set_option(libssh_rs::SshOption::IdentityAgent(Some(agent.clone())))?;
         }
+        // `split_path_list` rather than `split_whitespace` so a path containing
+        // a space survives; see its doc comment.
         if let Some(files) = self.config.get("identityfile") {
-            for file in files.split_whitespace() {
-                sess.set_option(libssh_rs::SshOption::AddIdentity(file.to_string()))?;
+            for file in crate::config::split_path_list(files) {
+                sess.set_option(libssh_rs::SshOption::AddIdentity(file))?;
             }
         }
         if let Some(kh) = self.config.get("userknownhostsfile") {
-            for file in kh.split_whitespace() {
-                sess.set_option(libssh_rs::SshOption::KnownHosts(Some(file.to_string())))?;
+            for file in crate::config::split_path_list(kh) {
+                sess.set_option(libssh_rs::SshOption::KnownHosts(Some(file)))?;
                 break;
             }
         }

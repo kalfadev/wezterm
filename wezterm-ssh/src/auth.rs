@@ -63,9 +63,11 @@ impl crate::sessioninner::SessionInner {
         use std::path::{Path, PathBuf};
 
         if let Some(files) = self.config.get("identityfile") {
-            for file in files.split_whitespace() {
+            // `split_path_list` rather than `split_whitespace` so a path
+            // containing a space survives; see its doc comment.
+            for file in crate::config::split_path_list(files) {
                 let pubkey: PathBuf = format!("{}.pub", file).into();
-                let file = Path::new(file);
+                let file = Path::new(&file);
 
                 if !file.exists() {
                     continue;
