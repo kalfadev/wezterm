@@ -308,6 +308,94 @@ impl ClusteredLine {
         self.last_cell_width
     }
 
+    /// The semantic zones of this line, computed from the clusters rather than
+    /// from the cells they stand for.
+    ///
+    /// The semantic type is an attribute, and an attribute is what a cluster
+    /// IS: every cell a cluster covers carries the same one, so a run of cells
+    /// sharing a semantic type is a run of clusters and there are a handful of
+    /// those where there are hundreds of cells. Walking the cells instead means
+    /// re-segmenting the line's text into graphemes, twice — which is what made
+    /// this the most expensive reading a resize took.
+    ///
+    /// `None` where the fast path cannot answer exactly, and the caller falls
+    /// back to the cell walk. Two cases: a line holding a double-width glyph,
+    /// where a cell index no longer counts graphemes and mapping the two needs
+    /// the segmentation this exists to avoid; and a cluster occupying no column
+    /// at all, which the cell walk still yields a cell for while a walk of the
+    /// clusters cannot say at which index.
+    pub fn semantic_zone_ranges(&self) -> Option<Vec<super::line::ZoneRange>> {
+        if self.is_double_wide.is_some() {
+            return None;
+        }
+        if self.clusters.iter().any(|cluster| cluster.cell_width == 0) {
+            return None;
+        }
+        // Every cell is one grapheme one column wide, so a cell index counts
+        // graphemes and a cluster's width counts its own.
+        let blank = CellAttributes::default();
+        let len = self.len as usize;
+
+        // The last cell that is not a blank — the bound the zones are cut at.
+        // A cell is blank where its text is a space AND its attributes are the
+        // default, so a cluster with attributes of its own has no blank cell in
+        // it whatever its text says.
+        let trailing_spaces = self.text.len() - self.text.trim_end_matches(' ').len();
+        let mut blank_tail = 0usize;
+        let mut unaccounted = trailing_spaces;
+        for cluster in self.clusters.iter().rev() {
+            if unaccounted == 0 || cluster.attrs != blank {
+                break;
+            }
+            let width = cluster.cell_width as usize;
+            let taken = width.min(unaccounted);
+            blank_tail += taken;
+            unaccounted -= taken;
+            if taken < width {
+                break;
+            }
+        }
+        // `Line::compute_zones` leaves this at the line's length where nothing
+        // is non-blank, which cuts nothing off; the same has to hold here.
+        let last_non_blank = len.checked_sub(blank_tail + 1).unwrap_or(len);
+
+        let mut zones: Vec<super::line::ZoneRange> = Vec::new();
+        let mut next_cell = 0usize;
+        for cluster in &self.clusters {
+            let start = next_cell;
+            let width = cluster.cell_width as usize;
+            next_cell += width;
+            if start > last_non_blank {
+                break;
+            }
+            let semantic_type = cluster.attrs.semantic_type();
+            // The run carries on where the type has not changed; the zone's end
+            // is the index of its LAST cell rather than one past it, which is
+            // what the walk this replaces produces.
+            // Cast rather than checked, because the walk this replaces casts:
+            // `grapheme_idx = cell.cell_index() as u16`. Same answer includes
+            // the same answer on a line longer than a `u16` counts.
+            let end = (start + width - 1).min(last_non_blank) as u16;
+            match zones.last_mut() {
+                Some(zone) if zone.semantic_type == semantic_type => zone.range.end = end,
+                _ => zones.push(super::line::ZoneRange {
+                    range: start as u16..end,
+                    semantic_type,
+                }),
+            }
+        }
+        Some(zones)
+    }
+
+    /// The counterpart of [`Self::set_last_cell_was_wrapped`], reading the
+    /// attribute from the cluster that holds it rather than from a walk of the
+    /// graphemes that cluster stands for.
+    pub fn last_cell_was_wrapped(&self) -> bool {
+        self.clusters
+            .last()
+            .is_some_and(|cluster| cluster.attrs.wrapped())
+    }
+
     pub fn set_last_cell_was_wrapped(&mut self, wrapped: bool) {
         if let Some(width) = self.compute_last_cell_width() {
             let width = width.get() as u16;

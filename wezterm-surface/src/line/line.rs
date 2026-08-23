@@ -424,6 +424,15 @@ impl Line {
     }
 
     fn compute_zones(&mut self) {
+        // The clusters already state what this walks the cells to find out, and
+        // they are two orders of magnitude fewer. Where they cannot say it
+        // exactly they answer `None`, and the walk below is taken as before.
+        if let CellStorage::C(cl) = &self.cells {
+            if let Some(zones) = cl.semantic_zone_ranges() {
+                self.zones = zones;
+                return;
+            }
+        }
         let blank_cell = Cell::blank();
         let mut last_cell: Option<CellRef> = None;
         let mut current_zone: Option<ZoneRange> = None;
@@ -1085,11 +1094,32 @@ impl Line {
 
     /// Return true if the last cell in the line has the wrapped attribute,
     /// indicating that the following line is logically a part of this one.
+    ///
+    /// Reached from the last cell rather than by walking to it. `visible_cells`
+    /// starts at column zero, so `.last()` on it costs the whole line — and
+    /// `Screen::resize` asks this of every line in the scrollback, which made a
+    /// column change O(scrollback x columns) even where nothing needed
+    /// rewrapping at all.
     pub fn last_cell_was_wrapped(&self) -> bool {
-        self.visible_cells()
-            .last()
-            .map(|c| c.attrs().wrapped())
-            .unwrap_or(false)
+        match &self.cells {
+            // The attribute belongs to the final cluster, which is exactly
+            // where `set_last_cell_was_wrapped` puts it.
+            CellStorage::C(cl) => cl.last_cell_was_wrapped(),
+            CellStorage::V(cells) => {
+                let Some(last) = cells.len().checked_sub(1) else {
+                    return false;
+                };
+                // A double-width glyph occupies the column after it with a
+                // padding cell that `visible_cells` never yields, so where the
+                // final column is covered by an earlier cell the attribute is
+                // that cell's.
+                let mut idx = last;
+                while idx > 0 && cells[idx - 1].width() > last + 1 - idx {
+                    idx -= 1;
+                }
+                cells[idx].attrs().wrapped()
+            }
+        }
     }
 
     /// Adjust the value of the wrapped attribute on the last cell of this
