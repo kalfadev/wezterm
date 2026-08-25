@@ -501,6 +501,14 @@ impl Pane for LocalPane {
         }
     }
 
+    fn is_bracketed_paste_enabled(&self) -> bool {
+        if self.tmux_domain.lock().is_some() {
+            false
+        } else {
+            self.terminal.lock().bracketed_paste_enabled()
+        }
+    }
+
     fn is_alt_screen_active(&self) -> bool {
         if self.tmux_domain.lock().is_some() {
             false

@@ -320,6 +320,19 @@ pub trait Pane: Downcast + Send + Sync {
     fn is_mouse_grabbed(&self) -> bool;
     fn is_alt_screen_active(&self) -> bool;
 
+    /// Returns true if the application running in the terminal has enabled
+    /// bracketed paste (DECSET 2004).
+    ///
+    /// `TerminalState` has answered this since bracketed paste was
+    /// implemented; what was missing was a way to ask a `Pane` for it, so a
+    /// front end could tell an application that reads its own input from a
+    /// shell sitting at a prompt. A default is given because only the local
+    /// pane holds a terminal to ask: every other implementor answers for
+    /// something it cannot observe.
+    fn is_bracketed_paste_enabled(&self) -> bool {
+        false
+    }
+
     fn set_clipboard(&self, _clipboard: &Arc<dyn Clipboard>) {}
     fn set_download_handler(&self, _handler: &Arc<dyn DownloadHandler>) {}
     fn set_config(&self, _config: Arc<dyn TerminalConfiguration>) {}
