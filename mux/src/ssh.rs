@@ -13,6 +13,7 @@ use smol::channel::{bounded, Receiver as AsyncReceiver};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufWriter, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -179,6 +180,14 @@ fn format_host_verification_for_terminal(failed: HostVerificationFailed) -> Vec<
 /// interactive setup.  The bulk of that is driven by `connect_ssh_session`.
 pub struct RemoteSshDomain {
     session: Mutex<Option<Session>>,
+    /// Whether a connection this domain held has been closed by
+    /// [`RemoteSshDomain::close_session`].
+    ///
+    /// A closed domain and one that has never connected both leave `session`
+    /// empty, and they owe opposite answers to [`RemoteSshDomain::state`].
+    /// Set by `close_session` and cleared when a new session is established,
+    /// so a domain reconnected through is `Attached` again.
+    session_closed: AtomicBool,
     dom: SshDomain,
     id: DomainId,
     name: String,
@@ -236,6 +245,7 @@ impl RemoteSshDomain {
             id,
             name: dom.name.clone(),
             session: Mutex::new(None),
+            session_closed: AtomicBool::new(false),
             dom: dom.clone(),
         })
     }
@@ -244,6 +254,33 @@ impl RemoteSshDomain {
         ssh_domain_to_ssh_config(&self.dom)
     }
 
+    /// Close this domain's connection, and forget it.
+    ///
+    /// A domain is never removed from the multiplexer, so it outlives the
+    /// connection it was built for and must be able to say so: the next
+    /// `spawn_pane` then finds nothing to reuse and establishes a new one,
+    /// rather than discovering through a failed request that what it held was a
+    /// corpse.
+    ///
+    /// Nothing here decides WHEN — that is the caller's, which is the only
+    /// party that knows whether anything still wants the connection.
+    ///
+    /// Answers whether there was a connection to close. Several paths reach a
+    /// closing tab and each of them asks; without an answer, every one of them
+    /// reports having closed the connection that the first of them closed.
+    pub fn close_session(&self) -> bool {
+        match self.session.lock().unwrap().take() {
+            Some(session) => {
+                session.shutdown();
+                // Recorded because taking the session leaves this domain
+                // indistinguishable from one that never connected, and the two
+                // owe opposite answers to `state`.
+                self.session_closed.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
     fn build_command(
         &self,
         pane_id: PaneId,
@@ -348,7 +385,10 @@ impl RemoteSshDomain {
         let (session, events) = Session::connect(self.ssh_config().context("obtain ssh config")?)
             .context("connect to ssh server")?;
         self.session.lock().unwrap().replace(session.clone());
-
+        // This domain is carrying again, so whatever it closed before stops
+        // being what `state` reports. Ordered after the session is in place, so
+        // no reader can find the flag down with nothing behind it.
+        self.session_closed.store(false, Ordering::Relaxed);
         // We get to establish the session!
         //
         // Since we want spawn to return the Pane in which
@@ -604,6 +644,20 @@ fn connect_ssh_session(
         }
     }
 
+    // Where the wait between pressing "connect" and seeing a prompt actually
+    // goes.
+    //
+    // Everything the caller can time itself finishes in milliseconds — the
+    // domain is registered, this thread is started, and the pane is handed
+    // back before a single packet has been exchanged. The whole of the
+    // perceived delay is inside this loop: the transport handshake, then as
+    // many authentication round trips as the server asks for, then the pty
+    // request. Without these two lines the only honest answer to "why is
+    // connecting slow" is a guess, so they are permanent rather than
+    // temporary, and at `info` because one line per connection is not a per-
+    // frame cost.
+    let connect_started = std::time::Instant::now();
+
     // Process authentication related events
     while let Ok(event) = smol::block_on(events.recv()) {
         match event {
@@ -662,6 +716,10 @@ fn connect_ssh_session(
                 shim.render(&message)?;
             }
             SessionEvent::Authenticated => {
+                log::info!(
+                    "ssh authenticated after {:?}",
+                    connect_started.elapsed()
+                );
                 // Our session has been authenticated: we can now
                 // set up the real pty for the pane
                 match smol::block_on(session.request_pty(
@@ -675,6 +733,7 @@ fn connect_ssh_session(
                         break;
                     }
                     Ok((pty, child)) => {
+                        log::info!("ssh pty ready after {:?}", connect_started.elapsed());
                         drop(shim);
 
                         // Obtain the real stdin/stdout for the pty
@@ -818,10 +877,30 @@ impl Domain for RemoteSshDomain {
     }
 
     fn state(&self) -> DomainState {
-        // Just pretend that we are always attached, as we don't
-        // have a defined attach operation that is distinct from
-        // a spawn.
-        DomainState::Attached
+        // A connection that has ended says so.
+        //
+        // This answered `Attached` unconditionally, on the grounds that there
+        // is no attach operation distinct from a spawn. That is true of
+        // ATTACHING and says nothing about having been DETACHED: the answer
+        // stayed `Attached` after the transport was lost, so the one thing a
+        // caller can ask about a connection's health always said it was
+        // healthy, and a session whose host had gone was indistinguishable
+        // from one that was merely quiet.
+        //
+        // A domain that has not connected yet keeps the old answer. Nothing
+        // has been lost there, and reporting a target as disconnected in the
+        // moment before its first pane exists would announce a failure that
+        // has not happened.
+        //
+        // A domain whose connection was CLOSED is the other empty case and owes
+        // the opposite answer: it did carry one and does not now. The two are
+        // told apart by `session_closed`, because taking the session leaves no
+        // trace of there having been one.
+        match self.session.lock().unwrap().as_ref() {
+            Some(session) if !session.is_alive() => DomainState::Detached,
+            None if self.session_closed.load(Ordering::Relaxed) => DomainState::Detached,
+            _ => DomainState::Attached,
+        }
     }
 }
 
