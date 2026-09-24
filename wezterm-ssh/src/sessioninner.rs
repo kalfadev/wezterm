@@ -242,6 +242,10 @@ pub(crate) struct SessionInner {
     /// handle cannot otherwise tell from a working connection, because the
     /// handle and its thread exist throughout. See [`crate::Session::is_established`].
     pub established: Arc<AtomicBool>,
+    /// Set where a public key won authentication, and left alone
+    /// where a password or keyboard-interactive did. See
+    /// [`crate::Session::authenticated_with_key`].
+    pub authenticated_with_key: Arc<AtomicBool>,
     /// When the far end was last holding something of ours it had
     /// not acknowledged, and had not acknowledged it since. `None` while the
     /// connection is answering. See [`SessionInner::note_delivery`].
