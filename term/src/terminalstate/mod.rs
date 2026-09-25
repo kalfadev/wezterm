@@ -507,6 +507,28 @@ impl std::io::Write for ThreadedWriter {
     }
 }
 
+/// Remove every bracketed paste marker from `text`, including the ones that
+/// removing another would create.
+///
+/// A single pass of `replace` is not enough: in `ESC[20` `ESC[201~` `1~` the
+/// middle marker goes and its two neighbours join into a new `ESC[201~`, which
+/// ends the paste early so that the rest of the text is read as typed input.
+/// Markers are removed from the end of the output as each one is completed,
+/// which leaves none behind in one linear pass.
+fn de_fang_paste(text: &str) -> String {
+    const MARKERS: [&str; 2] = ["\x1b[200~", "\x1b[201~"];
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        out.push(c);
+        if c == '~' {
+            if let Some(marker) = MARKERS.iter().find(|m| out.ends_with(*m)) {
+                out.truncate(out.len() - marker.len());
+            }
+        }
+    }
+    out
+}
+
 impl TerminalState {
     /// Constructs the terminal state.
     /// You generally want the `Terminal` struct rather than this one;
@@ -953,8 +975,7 @@ impl TerminalState {
         };
 
         let canon = canon.canonicalize(text);
-        let de_fanged = canon.replace("\x1b[200~", "").replace("\x1b[201~", "");
-        buf.push_str(&de_fanged);
+        buf.push_str(&de_fang_paste(&canon));
 
         if self.bracketed_paste {
             buf.push_str("\x1b[201~");
