@@ -2251,11 +2251,12 @@ impl TerminalState {
         let pen = self.pen.clone_sgr_only();
         let rows = self.screen().physical_rows as VisibleRowIndex;
         let col_range = 0..self.screen().physical_cols;
-        let whole_display = match erase {
-            EraseInDisplay::EraseDisplay => true,
-            EraseInDisplay::EraseToEndOfDisplay => cy == 0 && self.cursor.x == 0,
-            EraseInDisplay::EraseToStartOfDisplay | EraseInDisplay::EraseScrollback => false,
-        };
+        // Only an erase of the whole display, which is what `clear`, a line
+        // editor's clear-screen and a full reset send. An erase to the end of
+        // the display from the top left blanks the same rows, but a line
+        // editor sends it to redraw a prompt that happens to stand on the
+        // first row, and nothing was cleared.
+        let whole_display = matches!(erase, EraseInDisplay::EraseDisplay);
         let row_range = match erase {
             EraseInDisplay::EraseToEndOfDisplay => {
                 self.perform_csi_edit(Edit::EraseInLine(EraseInLine::EraseToEndOfLine));
