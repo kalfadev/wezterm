@@ -77,6 +77,10 @@ pub enum Alert {
     /// was counted at, so a consumer that indexes the primary screen by stable
     /// row learns, in order with every other alert, which rows were blanked.
     DisplayErased { top: StableRowIndex, cols: usize },
+    /// The shell marked where a command's output begins (OSC 133 C). Every
+    /// row written after the mark carries a sequence number of at least
+    /// `seqno`, and every row changed before it a lower one.
+    OutputStarted { seqno: SequenceNo },
 }
 
 pub trait AlertHandler: Send + Sync {

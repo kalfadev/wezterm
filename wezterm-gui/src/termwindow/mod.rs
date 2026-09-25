@@ -1220,7 +1220,7 @@ impl TermWindow {
                     self.update_title();
                 }
                 MuxNotification::Alert {
-                    alert: Alert::DisplayErased { .. },
+                    alert: Alert::DisplayErased { .. } | Alert::OutputStarted { .. },
                     ..
                 } => {}
                 MuxNotification::Alert {
@@ -1472,6 +1472,7 @@ impl TermWindow {
                     | Alert::Progress(_)
                     | Alert::SetUserVar { .. }
                     | Alert::DisplayErased { .. }
+                    | Alert::OutputStarted { .. }
                     | Alert::Bell,
             }
             | MuxNotification::PaneFocused(pane_id)

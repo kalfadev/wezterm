@@ -899,6 +899,16 @@ impl<'a> Performer<'a> {
                 FinalTermSemanticPrompt::MarkEndOfInputAndStartOfOutput { .. },
             ) => {
                 self.pen.set_semantic_type(SemanticType::Output);
+                // What the command prints from here on carries a sequence
+                // number above every row changed before the mark, even in the
+                // same read of output, and the alert says which: a front end can
+                // then tell a running command's rows from rows another program
+                // left on the screen before it.
+                self.increment_seqno();
+                let seqno = self.current_seqno();
+                if let Some(handler) = self.alert_handler.as_mut() {
+                    handler.alert(Alert::OutputStarted { seqno });
+                }
             }
 
             OperatingSystemCommand::FinalTermSemanticPrompt(
