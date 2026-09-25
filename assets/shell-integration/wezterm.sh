@@ -439,12 +439,17 @@ fi
 # tab). `printf '%s'` never interprets its argument, in bash or zsh.
 __wezterm_set_user_var() {
   if hash base64 2>/dev/null ; then
+    # One word, with no line breaks: GNU base64 breaks its output every 76
+    # characters, and unquoted each line became an argument of its own, so
+    # printf wrote the value's tail as a second, nameless escape.
+    local __wezterm_value
+    __wezterm_value="$(printf '%s' "$2" | base64 | tr -d '\n')"
     if [[ -z "${TMUX-}" ]] ; then
-      printf "\033]1337;SetUserVar=%s=%s\007" "$1" `printf '%s' "$2" | base64`
+      printf "\033]1337;SetUserVar=%s=%s\007" "$1" "$__wezterm_value"
     else
       # <https://github.com/tmux/tmux/wiki/FAQ#what-is-the-passthrough-escape-sequence-and-how-do-i-use-it>
       # Note that you ALSO need to add "set -g allow-passthrough on" to your tmux.conf
-      printf "\033Ptmux;\033\033]1337;SetUserVar=%s=%s\007\033\\" "$1" `printf '%s' "$2" | base64`
+      printf "\033Ptmux;\033\033]1337;SetUserVar=%s=%s\007\033\\" "$1" "$__wezterm_value"
     fi
   fi
 }
