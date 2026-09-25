@@ -71,6 +71,13 @@ pub enum Alert {
     OutputSinceFocusLost,
     /// A change to the progress bar state
     Progress(Progress),
+    /// The whole display of the primary screen was erased: an erase in
+    /// display covering every row, from the top left or all of it, which a
+    /// full reset does too. `top` is the stable row of the display's first
+    /// row at that moment, and `cols` the width it was counted at, so a
+    /// consumer that indexes the primary screen by stable row learns, in order
+    /// with every other alert, which rows were blanked.
+    DisplayErased { top: StableRowIndex, cols: usize },
 }
 
 pub trait AlertHandler: Send + Sync {

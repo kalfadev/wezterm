@@ -1220,6 +1220,10 @@ impl TermWindow {
                     self.update_title();
                 }
                 MuxNotification::Alert {
+                    alert: Alert::DisplayErased { .. },
+                    ..
+                } => {}
+                MuxNotification::Alert {
                     alert: Alert::PaletteChanged,
                     pane_id,
                 } => {
@@ -1467,6 +1471,7 @@ impl TermWindow {
                     | Alert::IconTitleChanged(_)
                     | Alert::Progress(_)
                     | Alert::SetUserVar { .. }
+                    | Alert::DisplayErased { .. }
                     | Alert::Bell,
             }
             | MuxNotification::PaneFocused(pane_id)

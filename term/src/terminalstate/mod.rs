@@ -2251,6 +2251,11 @@ impl TerminalState {
         let pen = self.pen.clone_sgr_only();
         let rows = self.screen().physical_rows as VisibleRowIndex;
         let col_range = 0..self.screen().physical_cols;
+        let whole_display = match erase {
+            EraseInDisplay::EraseDisplay => true,
+            EraseInDisplay::EraseToEndOfDisplay => cy == 0 && self.cursor.x == 0,
+            EraseInDisplay::EraseToStartOfDisplay | EraseInDisplay::EraseScrollback => false,
+        };
         let row_range = match erase {
             EraseInDisplay::EraseToEndOfDisplay => {
                 self.perform_csi_edit(Edit::EraseInLine(EraseInLine::EraseToEndOfLine));
@@ -2274,6 +2279,14 @@ impl TerminalState {
                 screen.clear_line(y, col_range.clone(), &pen, seqno, bidi_mode);
                 let line_idx = screen.phys_row(y);
                 screen.line_mut(line_idx).set_single_width(seqno);
+            }
+        }
+
+        if whole_display && !self.screen.alt_screen_is_active {
+            let top = self.screen().visible_row_to_stable_row(0);
+            let cols = self.screen().physical_cols;
+            if let Some(handler) = self.alert_handler.as_mut() {
+                handler.alert(Alert::DisplayErased { top, cols });
             }
         }
     }
