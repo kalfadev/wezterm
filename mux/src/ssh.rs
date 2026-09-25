@@ -200,6 +200,11 @@ pub struct RemoteSshDomain {
     /// re-use the FIRST attempt's, and the one the user has just typed would
     /// never be tried. See [`RemoteSshDomain::adopt_supplied_settings`].
     supplied_password: Mutex<Option<String>>,
+    /// Termob fork: the passphrase of the embedder's key file, held apart from
+    /// `dom` for the reason `supplied_password` is, and apart from the password
+    /// because it must never be sent to the server. See
+    /// [`TERMOB_PASSPHRASE_OPTION`].
+    supplied_passphrase: Mutex<Option<String>>,
     /// Termob fork: the `ssh_option`s most recently supplied by the embedder,
     /// held apart from `dom` for the reason `supplied_password` is — and for the
     /// same failure, one step further out.
@@ -217,7 +222,8 @@ pub struct RemoteSshDomain {
 }
 
 /// Termob fork: the `ssh_option` key carrying a password the embedder already
-/// collected from the user.
+/// collected from the user. A key's passphrase does not go here: see
+/// [`TERMOB_PASSPHRASE_OPTION`].
 ///
 /// It is answered to the server's first non-echoing authentication prompt
 /// instead of the line editor this file runs inside the pane, so a connection
@@ -233,10 +239,52 @@ pub const TERMOB_PASSWORD_OPTION: &str = "termob_password";
 /// An empty value is the same thing as no value: the field the user left blank
 /// must leave the prompt to the pane rather than answer it with nothing.
 fn supplied_password_of(dom: &SshDomain) -> Option<String> {
-    dom.ssh_option
-        .get(TERMOB_PASSWORD_OPTION)
-        .filter(|p| !p.is_empty())
-        .cloned()
+    supplied_secret_of(dom, TERMOB_PASSWORD_OPTION)
+}
+
+/// Termob fork: the `ssh_option` key carrying the passphrase of the key file
+/// the embedder named.
+///
+/// **Kept apart from [`TERMOB_PASSWORD_OPTION`] because it answers a different
+/// question.** A passphrase unlocks a file on this machine and is given only to
+/// the prompt that asks for it ([`take_supplied_answer`]). Carried as a
+/// password, it answered the server's first hidden prompt — and a server that
+/// does not know the key asks for a login password without the key ever being
+/// opened, so the passphrase was sent to it.
+///
+/// Taken out of the map and never written to the ssh config, as the password is.
+pub const TERMOB_PASSPHRASE_OPTION: &str = "termob_passphrase";
+
+/// Termob fork: the passphrase an [`SshDomain`] carries, if it carries one.
+fn supplied_passphrase_of(dom: &SshDomain) -> Option<String> {
+    supplied_secret_of(dom, TERMOB_PASSPHRASE_OPTION)
+}
+
+/// An empty value is the same thing as no value: the field the user left blank
+/// must leave the prompt to the pane rather than answer it with nothing.
+fn supplied_secret_of(dom: &SshDomain, key: &str) -> Option<String> {
+    dom.ssh_option.get(key).filter(|p| !p.is_empty()).cloned()
+}
+
+/// Termob fork: the secret the embedder already holds that answers `prompt`,
+/// taken so that it is offered once.
+///
+/// A passphrase answers only the prompt that unlocks a key, and a password only
+/// a hidden prompt from the server; anything else is left to the line editor
+/// in the pane. `take` rather than a clone: a secret that was refused would
+/// otherwise be offered to every retry, and the user would never be asked.
+pub fn take_supplied_answer(
+    prompt: &wezterm_ssh::AuthenticationPrompt,
+    password: &mut Option<String>,
+    passphrase: &mut Option<String>,
+) -> Option<String> {
+    if prompt.unlocks_key {
+        passphrase.take()
+    } else if !prompt.echo {
+        password.take()
+    } else {
+        None
+    }
 }
 
 pub fn ssh_domain_to_ssh_config(ssh_dom: &SshDomain) -> anyhow::Result<ConfigMap> {
@@ -269,7 +317,7 @@ pub fn ssh_domain_to_ssh_config(ssh_dom: &SshDomain) -> anyhow::Result<ConfigMap
         // Termob fork: the password is for the auth responder in this file, not
         // for the ssh config — and the config below is logged in full when
         // `wezterm_ssh_verbose` is set.
-        if k == TERMOB_PASSWORD_OPTION {
+        if k == TERMOB_PASSWORD_OPTION || k == TERMOB_PASSPHRASE_OPTION {
             continue;
         }
         ssh_config.insert(k.to_string(), v.to_string());
@@ -298,6 +346,7 @@ impl RemoteSshDomain {
             name: dom.name.clone(),
             session: Mutex::new(None),
             supplied_password: Mutex::new(supplied_password_of(dom)),
+            supplied_passphrase: Mutex::new(supplied_passphrase_of(dom)),
             supplied_options: Mutex::new(dom.ssh_option.clone()),
             session_closed: AtomicBool::new(false),
             pty_ready: smol::channel::bounded(1),
@@ -329,6 +378,7 @@ impl RemoteSshDomain {
     /// what runs inside a pane rather than how the connection is made.
     pub fn adopt_supplied_settings(&self, dom: &SshDomain) {
         *self.supplied_password.lock().unwrap() = supplied_password_of(dom);
+        *self.supplied_passphrase.lock().unwrap() = supplied_passphrase_of(dom);
         *self.supplied_options.lock().unwrap() = dom.ssh_option.clone();
     }
 
@@ -566,6 +616,7 @@ impl RemoteSshDomain {
         // domain already stands for uses the secret typed for THAT attempt; see
         // `adopt_supplied_settings`.
         let supplied_password = self.supplied_password.lock().unwrap().clone();
+        let supplied_passphrase = self.supplied_passphrase.lock().unwrap().clone();
         let pty_ready_tx = self.pty_ready.0.clone();
         std::thread::spawn(move || {
             if let Err(err) = connect_ssh_session(
@@ -581,6 +632,7 @@ impl RemoteSshDomain {
                 command_line,
                 env,
                 supplied_password,
+                supplied_passphrase,
                 pty_ready_tx,
             ) {
                 let _ = write!(stdout_write, "{:#}", err);
@@ -612,9 +664,12 @@ fn connect_ssh_session(
     size: Arc<Mutex<TerminalSize>>,
     command_line: Option<String>,
     env: HashMap<String, String>,
-    // Termob fork: a password the embedder already has, answered to the first
-    // non-echoing prompt. See `TERMOB_PASSWORD_OPTION`.
+    // Termob fork: a password the embedder already has, answered to the
+    // server's first non-echoing prompt. See `TERMOB_PASSWORD_OPTION`.
     mut supplied_password: Option<String>,
+    // Termob fork: the passphrase of the embedder's key, answered only to the
+    // prompt that unlocks it. See `TERMOB_PASSPHRASE_OPTION`.
+    mut supplied_passphrase: Option<String>,
     // Termob fork: signalled once the pty exists, so that an embedder's own
     // work on this session queues behind it. See `RemoteSshDomain::pty_ready`.
     pty_ready_tx: smol::channel::Sender<()>,
@@ -824,17 +879,16 @@ fn connect_ssh_session(
                 }
                 let mut answers = vec![];
                 for prompt in &auth.prompts {
-                    // Termob fork: a password the embedder collected answers the
-                    // first prompt that hides what is typed. `take` rather than
-                    // a clone on purpose — a password the server refuses would
-                    // otherwise be offered to every retry in turn and the user
-                    // would never be asked, so the second prompt falls through
-                    // to the line editor below.
-                    if !prompt.echo {
-                        if let Some(password) = supplied_password.take() {
-                            answers.push(password);
-                            continue;
-                        }
+                    // Termob fork: a secret the embedder collected answers the
+                    // prompt it belongs to, once; a second prompt falls through
+                    // to the line editor below. See `take_supplied_answer`.
+                    if let Some(secret) = take_supplied_answer(
+                        prompt,
+                        &mut supplied_password,
+                        &mut supplied_passphrase,
+                    ) {
+                        answers.push(secret);
+                        continue;
                     }
                     let mut prompt_lines = prompt.prompt.split('\n').collect::<Vec<_>>();
                     let editor_prompt = prompt_lines.pop().unwrap();

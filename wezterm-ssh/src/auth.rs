@@ -16,6 +16,14 @@ pub const TERMOB_PREFER_PASSWORD_OPTION: &str = "termob_prefer_password";
 pub struct AuthenticationPrompt {
     pub prompt: String,
     pub echo: bool,
+    /// Termob fork: whether the answer unlocks a private key on this machine
+    /// (a passphrase) rather than being sent to the server.
+    ///
+    /// An embedder that already holds a secret has to know which of the two a
+    /// prompt asks for: a key's passphrase given to a server's password
+    /// prompt leaves this machine, and a server that does not know the key asks
+    /// for a password without the key ever being opened.
+    pub unlocks_key: bool,
 }
 
 #[derive(Debug)]
@@ -122,6 +130,7 @@ impl crate::sessioninner::SessionInner {
                                         host
                                     ),
                                     echo: false,
+                                    unlocks_key: true,
                                 }],
                                 reply,
                             }))
@@ -168,6 +177,7 @@ impl crate::sessioninner::SessionInner {
                         None => prompt.to_string(),
                     },
                     echo,
+                    unlocks_key: true,
                 }],
                 reply,
             }))
@@ -230,6 +240,7 @@ impl crate::sessioninner::SessionInner {
                         prompts: vec![AuthenticationPrompt {
                             prompt: "Password: ".to_string(),
                             echo: false,
+                            unlocks_key: false,
                         }],
                         reply,
                     }))
@@ -306,6 +317,7 @@ impl crate::sessioninner::SessionInner {
                                         .map(|p| AuthenticationPrompt {
                                             prompt: p.prompt,
                                             echo: p.echo,
+                                            unlocks_key: false,
                                         })
                                         .collect(),
                                     reply,
@@ -378,6 +390,7 @@ impl crate::sessioninner::SessionInner {
                             prompts: vec![AuthenticationPrompt {
                                 prompt: "Password: ".to_string(),
                                 echo: false,
+                                unlocks_key: false,
                             }],
                             reply,
                         }))
@@ -459,6 +472,7 @@ impl crate::sessioninner::SessionInner {
                         prompts: vec![AuthenticationPrompt {
                             prompt: format!("Password for {}@{}: ", user, host),
                             echo: false,
+                            unlocks_key: false,
                         }],
                         reply,
                     }))
@@ -498,6 +512,7 @@ impl crate::sessioninner::SessionInner {
                                     .map(|p| AuthenticationPrompt {
                                         prompt: p.text.to_string(),
                                         echo: p.echo,
+                                        unlocks_key: false,
                                     })
                                     .collect(),
                                 reply,
