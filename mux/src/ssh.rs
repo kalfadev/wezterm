@@ -219,6 +219,58 @@ pub struct RemoteSshDomain {
     /// Termob fork: signalled when the first pane's pty is ready. See
     /// [`RemoteSshDomain::pty_ready`].
     pty_ready: (smol::channel::Sender<()>, smol::channel::Receiver<()>),
+    /// Termob fork: how the last connection this domain established used the
+    /// secret the embedder supplied; `None` until it has authenticated. See
+    /// [`RemoteSshDomain::authenticated_secret_use`].
+    supplied_verdict: Arc<Mutex<Option<SuppliedSecretUse>>>,
+}
+
+/// Termob fork: the secret the embedder supplied, as authentication used it:
+/// whether it answered a prompt, and whether the user then had to answer a
+/// hidden prompt in the pane, which a refused password or passphrase brings.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SuppliedSecretUse {
+    /// The supplied password or passphrase answered a prompt.
+    pub offered: bool,
+    /// The user answered a hidden prompt in the pane.
+    pub typed_hidden: bool,
+}
+
+impl SuppliedSecretUse {
+    /// Once authentication has succeeded: `Some(true)` where the supplied
+    /// secret did it alone, `Some(false)` where it was offered and the user
+    /// still had to type one, `None` where it was never asked for. A second
+    /// hidden factor after an accepted password reads as a refusal too: the
+    /// prompts do not say which of the two they are.
+    pub fn verdict(self) -> Option<bool> {
+        self.offered.then_some(!self.typed_hidden)
+    }
+}
+
+#[cfg(test)]
+mod supplied_secret_tests {
+    use super::SuppliedSecretUse;
+
+    #[test]
+    fn a_verdict_only_for_a_secret_that_was_asked_for() {
+        let unused = SuppliedSecretUse::default();
+        assert_eq!(unused.verdict(), None);
+        let alone = SuppliedSecretUse {
+            offered: true,
+            typed_hidden: false,
+        };
+        assert_eq!(alone.verdict(), Some(true));
+        let refused = SuppliedSecretUse {
+            offered: true,
+            typed_hidden: true,
+        };
+        assert_eq!(refused.verdict(), Some(false));
+        let typed_only = SuppliedSecretUse {
+            offered: false,
+            typed_hidden: true,
+        };
+        assert_eq!(typed_only.verdict(), None);
+    }
 }
 
 /// Termob fork: the `ssh_option` key carrying a password the embedder already
@@ -350,8 +402,19 @@ impl RemoteSshDomain {
             supplied_options: Mutex::new(dom.ssh_option.clone()),
             session_closed: AtomicBool::new(false),
             pty_ready: smol::channel::bounded(1),
+            supplied_verdict: Arc::new(Mutex::new(None)),
             dom: dom.clone(),
         })
+    }
+
+    /// Termob fork: how the last connection this domain established used the
+    /// secret the embedder supplied ([`SuppliedSecretUse::verdict`] says
+    /// whether it let the connection in by itself); `None` until that
+    /// connection has authenticated. Set before the pty is requested, so it is
+    /// there once [`Self::pty_ready`] is. Read without taking `pty_ready`,
+    /// which has one token and another waiter.
+    pub fn authenticated_secret_use(&self) -> Option<SuppliedSecretUse> {
+        *self.supplied_verdict.lock().unwrap()
     }
 
     /// Termob fork: take this attempt's connection settings from `dom`,
@@ -380,6 +443,7 @@ impl RemoteSshDomain {
         *self.supplied_password.lock().unwrap() = supplied_password_of(dom);
         *self.supplied_passphrase.lock().unwrap() = supplied_passphrase_of(dom);
         *self.supplied_options.lock().unwrap() = dom.ssh_option.clone();
+        *self.supplied_verdict.lock().unwrap() = None;
     }
 
     pub fn ssh_config(&self) -> anyhow::Result<ConfigMap> {
@@ -618,6 +682,7 @@ impl RemoteSshDomain {
         let supplied_password = self.supplied_password.lock().unwrap().clone();
         let supplied_passphrase = self.supplied_passphrase.lock().unwrap().clone();
         let pty_ready_tx = self.pty_ready.0.clone();
+        let supplied_verdict = Arc::clone(&self.supplied_verdict);
         std::thread::spawn(move || {
             if let Err(err) = connect_ssh_session(
                 session,
@@ -634,6 +699,7 @@ impl RemoteSshDomain {
                 supplied_password,
                 supplied_passphrase,
                 pty_ready_tx,
+                supplied_verdict,
             ) {
                 let _ = write!(stdout_write, "{:#}", err);
                 log::error!("Failed to connect ssh: {:#}", err);
@@ -673,7 +739,11 @@ fn connect_ssh_session(
     // Termob fork: signalled once the pty exists, so that an embedder's own
     // work on this session queues behind it. See `RemoteSshDomain::pty_ready`.
     pty_ready_tx: smol::channel::Sender<()>,
+    // Termob fork: where the use of the supplied secret goes once the host
+    // has let the connection in. See `RemoteSshDomain::authenticated_secret_use`.
+    supplied_verdict: Arc<Mutex<Option<SuppliedSecretUse>>>,
 ) -> anyhow::Result<()> {
+    let mut supplied_use = SuppliedSecretUse::default();
     struct StdoutShim<'a> {
         size: Arc<Mutex<TerminalSize>>,
         stdout: &'a mut BufWriter<FileDescriptor>,
@@ -887,6 +957,7 @@ fn connect_ssh_session(
                         &mut supplied_password,
                         &mut supplied_passphrase,
                     ) {
+                        supplied_use.offered = true;
                         answers.push(secret);
                         continue;
                     }
@@ -900,6 +971,9 @@ fn connect_ssh_session(
                     editor.set_prompt(editor_prompt);
                     host.echo = prompt.echo;
                     if let Some(line) = editor.read_line(&mut host)? {
+                        if !prompt.echo {
+                            supplied_use.typed_hidden = true;
+                        }
                         answers.push(line);
                     } else {
                         anyhow::bail!("Authentication was cancelled");
@@ -919,6 +993,9 @@ fn connect_ssh_session(
                     "ssh authenticated after {:?}",
                     connect_started.elapsed()
                 );
+                // Termob fork: before the pty, so that it is there by the time
+                // `pty_ready` is.
+                *supplied_verdict.lock().unwrap() = Some(supplied_use);
                 // Our session has been authenticated: we can now
                 // set up the real pty for the pane
                 match smol::block_on(session.request_pty(
