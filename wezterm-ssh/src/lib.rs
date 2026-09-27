@@ -7,6 +7,8 @@ mod config;
 mod dirwrap;
 mod filewrap;
 mod host;
+// Termob fork: forgetting a changed host key (`forget_host_key`).
+mod known_hosts;
 mod pty;
 mod session;
 mod sessioninner;
@@ -17,6 +19,7 @@ mod sftpwrap;
 pub use auth::*;
 pub use config::*;
 pub use host::*;
+pub use known_hosts::forget_host_key;
 pub use pty::*;
 pub use session::*;
 pub use sftp::error::*;

@@ -900,6 +900,38 @@ fn connect_ssh_session(
             s.push_str("\r\n");
             self.render(&[Change::Text(s)])
         }
+
+        /// Termob fork: asks whether to forget the key `file` holds for
+        /// `host` on `port`, which the host no longer shows, and forgets it
+        /// on a yes, saying what came of it.
+        fn forget_changed_host_key(
+            &mut self,
+            file: &std::path::Path,
+            host: &str,
+            port: u16,
+        ) -> termwiz::Result<()> {
+            self.output_line("")?;
+            let mut editor = LineEditor::new(self);
+            let mut prompt = PasswordPromptHost::default();
+            prompt.echo = true;
+            editor.set_prompt(
+                "Forget the old key, so that the next connection asks about the new one? [y/n]> ",
+            );
+            let answer = editor.read_line(&mut prompt)?;
+            if !matches!(answer.as_deref(), Some("y" | "Y" | "yes" | "YES")) {
+                return self.output_line("The old key is kept.");
+            }
+            match wezterm_ssh::forget_host_key(file, host, port) {
+                Ok(0) => self.output_line(&format!(
+                    "{} holds no entry for {host} that termob can remove: remove it there by hand.",
+                    file.display()
+                )),
+                Ok(_) => self.output_line(
+                    "The old key is forgotten. Connect again, and you will be asked whether to trust the new one.",
+                ),
+                Err(err) => self.output_line(&format!("The old key could not be forgotten: {err:#}")),
+            }
+        }
     }
 
     // Where the wait between pressing "connect" and seeing a prompt actually
@@ -985,8 +1017,19 @@ fn connect_ssh_session(
                 shim.output_line(&format!("Error: {}", err))?;
             }
             SessionEvent::HostVerificationFailed(failed) => {
+                // Termob fork: where no shell can run `ssh-keygen -R`, a phone
+                // above all, the old key is forgotten from here on the user's
+                // word; the next connection then asks about the new key as it
+                // asks about any unknown one.
+                let forget = failed
+                    .file
+                    .clone()
+                    .map(|file| (file, failed.host.clone(), failed.port));
                 let message = format_host_verification_for_terminal(failed);
                 shim.render(&message)?;
+                if let Some((file, host, port)) = forget {
+                    shim.forget_changed_host_key(&file, &host, port)?;
+                }
             }
             SessionEvent::Authenticated => {
                 log::info!(

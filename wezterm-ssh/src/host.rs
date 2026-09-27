@@ -8,6 +8,10 @@ pub struct HostVerificationFailed {
     pub remote_address: String,
     pub key: String,
     pub file: Option<std::path::PathBuf>,
+    /// Termob fork: the host and the port as `known_hosts` names them, for
+    /// `forget_host_key`.
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Debug)]
@@ -75,6 +79,8 @@ impl crate::sessioninner::SessionInner {
                     remote_address: format!("{hostname}:{port}"),
                     key,
                     file,
+                    host: hostname.to_string(),
+                    port,
                 };
                 self.tx_event
                     .try_send(SessionEvent::HostVerificationFailed(failed))
@@ -194,6 +200,8 @@ impl crate::sessioninner::SessionInner {
                         remote_address: remote_address.to_string(),
                         key: fingerprint,
                         file: Some(file.to_path_buf()),
+                        host: remote_host_name.to_string(),
+                        port,
                     };
                     self.tx_event
                         .try_send(SessionEvent::HostVerificationFailed(failed))

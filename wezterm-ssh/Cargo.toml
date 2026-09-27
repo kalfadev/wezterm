@@ -41,6 +41,8 @@ wezterm-uds.workspace = true
 
 # Not used directly, but is used to centralize the openssl vendor feature selection
 async_ossl.workspace = true
+# Termob fork: HMAC-SHA1 for the hashed names of `known_hosts::forget_host_key`.
+openssl.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 passfd.workspace = true
