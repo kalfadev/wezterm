@@ -3,14 +3,16 @@
 //! `ssh-keygen -R`, a phone above all.
 
 use anyhow::Context;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// Removes from `file` each name that stands for `host` on `port` exactly:
 /// `host` itself on port 22, `[host]:port` on any port, plainly or hashed
 /// (`|1|salt|hash`), with the case of the host ignored as OpenSSH ignores it.
 /// A line that also names other hosts keeps them; wildcard patterns,
 /// negations, comments and `@` marker lines are left alone. Returns how many
-/// names were removed; the file is written again only when there were some.
+/// names were removed; the file is written again only when there were some,
+/// and then as [`replace_whole`] writes it.
 pub fn forget_host_key(file: &Path, host: &str, port: u16) -> anyhow::Result<usize> {
     let text = std::fs::read_to_string(file)
         .with_context(|| format!("reading known_hosts file {}", file.display()))?;
@@ -27,10 +29,38 @@ pub fn forget_host_key(file: &Path, host: &str, port: u16) -> anyhow::Result<usi
         kept.push_str(&line);
     }
     if removed > 0 {
-        std::fs::write(file, kept)
-            .with_context(|| format!("writing known_hosts file {}", file.display()))?;
+        replace_whole(file, &kept)?;
     }
     Ok(removed)
+}
+
+/// Writes `text` over `file` as `ssh-keygen -R` does: whole, under another name
+/// beside it, then renamed over it, so that a crash or a full disk leaves the
+/// old file or the new one and never part of either. A symlinked file is
+/// written where the link points and the link stays; the file keeps its
+/// permissions.
+fn replace_whole(file: &Path, text: &str) -> anyhow::Result<()> {
+    let target = std::fs::canonicalize(file)
+        .with_context(|| format!("resolving known_hosts file {}", file.display()))?;
+    let permissions = std::fs::metadata(&target)
+        .with_context(|| format!("reading known_hosts file {}", target.display()))?
+        .permissions();
+    let mut name = target.clone().into_os_string();
+    name.push(".termob-new");
+    let temp = PathBuf::from(name);
+    let written = (|| -> std::io::Result<()> {
+        let mut out = std::fs::File::create(&temp)?;
+        out.set_permissions(permissions)?;
+        out.write_all(text.as_bytes())?;
+        out.sync_all()?;
+        std::fs::rename(&temp, &target)
+    })();
+    if written.is_err() {
+        // The temporary file is ours, not the user's, and the error that
+        // matters is the write's: a failure to remove it is not reported.
+        let _ = std::fs::remove_file(&temp);
+    }
+    written.with_context(|| format!("writing known_hosts file {}", target.display()))
 }
 
 /// `line` without the patterns that name one of `names`, and how many went;
